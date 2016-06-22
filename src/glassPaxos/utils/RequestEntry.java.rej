@@ -1,0 +1,34 @@
+--- src/glassPaxos/utils/RequestEntry.java	(revision )
++++ src/glassPaxos/utils/RequestEntry.java	(revision 296)
+@@ -9,15 +9,13 @@
+     private boolean resubmit; //true if resubmitted
+     private long cTime;
+     private AppClientCallback cb;
+-    private byte[] reply;
+ 
+-    public RequestEntry(long reqNum, byte[] req, boolean resubmit, long cTime, AppClientCallback cb, byte[] reply) {
++    public RequestEntry(long reqNum, byte[] req, boolean resubmit, long cTime, AppClientCallback cb) {
+         this.reqNum = reqNum;
+         this.req = req;
+         this.resubmit = resubmit;
+         this.cTime = cTime;
+         this.cb = cb;
+-        this.reply = reply;
+     }
+ 
+     public long getReqnum() {
+@@ -46,14 +44,6 @@
+ 
+     public AppClientCallback getCb() {
+         return cb;
+-    }
+-
+-    public void setReply(byte[] reply) {
+-        this.reply = reply;
+-    }
+-
+-    public byte[] getReply() {
+-        return reply;
+     }
+ 
+     public String toString() {

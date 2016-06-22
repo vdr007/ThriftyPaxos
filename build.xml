@@ -1,0 +1,65 @@
+<project name="glassPaxos" default="dist" basedir=".">
+    <description>
+        simple example build file
+    </description>
+  <!-- set global properties for this build -->
+  <property name="glassPaxos" location="src/glassPaxos"/>
+  <property name="build" location="build"/>
+  <property name="dist"  location="dist"/>
+
+  <path id="classpath">
+    <fileset dir="lib/">
+      <include name="**/*.jar"/>
+    </fileset>
+  </path>
+
+
+  <target name="init">
+    <!-- Create the time stamp -->
+    <tstamp/>
+    <!-- Create the build directory structure used by compile -->
+    <mkdir dir="${build}"/>
+  </target>
+
+  <target name="compile" depends="init"
+        description="compile the source " >
+    <!-- Compile the java code from ${src} into ${build} -->
+    <javac srcdir="${glassPaxos}" destdir="${build}"
+	debug="true" debuglevel="lines,vars,source">
+      <classpath refid="classpath"/>
+    </javac>
+  </target>
+
+
+  <target name="dist" depends="compile"
+        description="generate the distribution" >
+    <!-- Create the distribution directory -->
+    <mkdir dir="${dist}/lib"/>
+    <!-- Put everything in ${build} into the MyProject-${DSTAMP}.jar file -->
+    <jar jarfile="${dist}/lib/glassPaxos.jar" basedir="${build}">
+    </jar>
+    <!-- Copying the jar file to lib directory of hdfs -->
+
+  </target>
+
+  <target name="clean"
+        description="clean up" >
+    <!-- Delete the ${build} and ${dist} directory trees -->
+    <delete dir="${build}"/>
+    <delete dir="${dist}"/>
+  </target>
+
+  <target name="justjar"
+        description="generate the jarfile" >
+    <!-- Create the distribution directory -->
+    <mkdir dir="${dist}/lib"/>
+
+    <!-- Put everything in ${build} into the MyProject-${DSTAMP}.jar file -->
+    <jar jarfile="${dist}/lib/emulator.jar" basedir="${build}"/>
+    <!-- Copying the jar file to lib directory of hdfs -->
+     <copy file="${dist}/lib/emulator.jar" todir="simple_test" />
+
+  </target>
+
+</project>
+

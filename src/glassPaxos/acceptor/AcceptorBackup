@@ -1,0 +1,336 @@
+## acceptor backup functions ##
+
+
+## throttle utils ##
+    import java.util.concurrent.atomic.AtomicBoolean;
+    private final AtomicBoolean throttled = new AtomicBoolean(false);
+
+    public void disableRecv() {
+        synchronized (learnerActiveSet) {
+            if (throttled.compareAndSet(false, true)) {
+                lastDisableTimestamp = System.currentTimeMillis();
+
+                if (!learnerActiveSet.isEmpty()) {
+                    for (int k : learnerActiveSet.keySet()) {
+                        NodeIdentifier learner = new NodeIdentifier(k);
+                        network.sendMessage(learner, new PingMessage(myID, -4));  //-4 to indicate request FreeLogMessage
+                    }
+                }
+                LOG.info("disable receiving new requests, firstUnstable %d, ckPt %d\n", firstUnstableIndex, checkpointIndex);
+            }
+        }
+    }
+
+    public void enableRecv() {
+        if (throttled.compareAndSet(true, false)) {
+            LOG.info("enable receiving new requests, firstUnstable %d, ckPt %d\n", firstUnstableIndex, checkpointIndex);
+        }
+    }
+
+## handle all acceptors on the same node, use separate acceptorLog dir ##
+        String acceptorLogPath = Configuration.acceptorLogDir + "/acceptor" + rank;
+        String acceptorLogPath = Configuration.acceptorLogDir;
+        File logDir = new File(acceptorLogPath);
+        for (File f: logDir.listFiles()) {
+            f.delete();
+        }
+        acceptor.acceptorLog = new AcceptorLog(acceptorLogPath);
+
+## read last acceptor GC index from disk ##
+        set checkpointIndex to latest checkpoint, used by fail-recover acceptor
+        checkpointIndex = AcceptorGCIndex.readGCIndex(Configuration.acceptorGCStatFile);
+        acceptor.LOG.debug("get GC checkpointIndex %d\n", checkpointIndex);
+
+        try {
+            //record checkpointIndex into GCStatFile after GC
+            AcceptorGCIndex.writeGCIndex(Configuration.acceptorGCStatFile, checkpointIndex);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+## Unit Test: wakeup/sync/catchup messages ##
+    private void unitTestCatchup() throws InterruptedException {
+        while (true) {
+            if (isLeader)
+                Thread.sleep(1000);
+            if (firstUnstableIndex > Configuration.checkpointInterval) {
+                LOG.debug("==>checkpoint %d, first_unstable %d, send Wakeup\n",
+                        checkpointIndex, firstUnstableIndex);
+                network.sendMessage(Configuration.acceptorIDs.get(3),
+                        new WakeupMessage(myID, checkpointIndex, maxLogIndex));
+                break;
+            }
+        }
+    }
+
+##  follower catchup proposer if firstUnstable fail behind inside processAccept() ##
+    // acceptor catchup leader acceptorLogCache
+    if (firstUnstableIndex < catchupIdx) {
+        int diffLen = (int) (catchupIdx - firstUnstableIndex);
+        network.sendMessage(msg.getSender(), new SyncMessage(myID,
+                firstUnstableIndex, diffLen));
+        LOG.debug("-> acceptor catch-up leader sync<firstUnstable %d, len %d>\n",
+                firstUnstableIndex, diffLen);
+    }
+
+## sequentially fetch swapIn acceptor from backupSet (List) ##
+    swapIn = backupSet.remove(0);
+    int idx = acceptSet.indexOf(swapOut);
+    acceptSet.remove(idx);
+    acceptSet.add(swapIn);
+    backupSet.add(swapOut); //append to the end of the list
+
+## change LOG debug level ## (NOT work)
+    Configuration.changeDebugLevel(0);
+    Configuration.addActiveLogger("Acceptor", Configuration.debugLevel);
+    LOG = SimpleLogger.getLogger("Acceptor");
+
+
+## immediate start follower catchup within processWakeup() ##
+    if (acceptorCatchupEnd >= acceptorCatchupStart) {
+        tsSwitchFollowerStart = System.currentTimeMillis();
+        acceptorCatchupDone = false;
+        acceptorCatchupSendDone = false;
+        int chunks = (int) (acceptorCatchupEnd - acceptorCatchupStart + syncAccChunkSize) / syncAccChunkSize;
+        int sendChunks = Math.min(chunks, maxPendingCatchup);
+
+        for (int s = 0; s < sendChunks; s++) {
+            long cKey = acceptorCatchupStart + syncAccChunkSize * s;
+            //Quorum quorum = new Quorum(1, 0); //only the leader
+            //quorum.qrmap.put(msg.getSender().hashCode(), new QuorumEntry(false, System.currentTimeMillis()));
+            //acceptorCatchupQuorums.put(cKey, quorum);
+            acceptorCatchupTrack.put(cKey, new AcceptMsgChunk(syncAccChunkSize, System.currentTimeMillis()));
+            LOG.debug("wakeup acceptorCatchupTrack add entry[%d], s=%d\n", cKey, s);
+        }
+        SyncMessage sync;
+        if (chunks <= maxPendingCatchup) {
+            acceptorCatchupSendDone = true;
+            sync = new SyncMessage(myID, acceptorCatchupStart, (int)(acceptorCatchupEnd-acceptorCatchupStart+1));
+        } else {
+            sync = new SyncMessage(myID, acceptorCatchupStart, maxPendingCatchup * syncAccChunkSize);
+            acceptorCatchupStart += maxPendingCatchup*syncAccChunkSize;
+            LOG.info("wakeup next (%d, %d) chunks %d ckPt %d firstUn %d catchDone %b sendDone %b\n",
+                    acceptorCatchupStart, acceptorCatchupEnd, chunks, checkpointIndex, firstUnstableIndex,
+                    acceptorCatchupDone, acceptorCatchupSendDone);
+        }
+        network.sendMessage(msg.getSender(), sync);
+        LOG.info("wakeup acceptor send %s ==> %s\n", sync, msg.getSender());
+
+        network.sendMessage(Configuration.clientIDs.get(1), new InfoMessage(myID,
+                "wakeup follower catchupLen="+(acceptorCatchupEnd-acceptorCatchupStart+1)/1000000.0 + "M"));
+    }
+
+## process all follower sync in one func ##
+    @Deprecated
+    private void processAcceptorSync(SyncMessage msg) {
+
+        NodeIdentifier receiver = msg.getSender();
+        long msgUnstableIndex = msg.getStart();
+        long start;
+        int sliceSize = syncAccChunkSize;
+        int slices, len;
+
+        //leaderProcessPromise set [catchupIndex <== msgMaxLogIndex]
+        long syncEndIndex = maxLogIndex + 1;
+
+        //missing log entries only in memory
+        if (checkpointIndex < msgUnstableIndex) {
+            start = msgUnstableIndex;
+            if (syncEndIndex > msgUnstableIndex) {
+                slices = (int) ((syncEndIndex-msgUnstableIndex)/sliceSize);
+                LOG.debug("msgUnstable %d, checkpoint %d, syncEndIndex %d, slices %d\n",
+                        msgUnstableIndex, checkpointIndex, syncEndIndex, slices);
+                for (int i = 0; i < slices; i++) {
+                    sendAcceptorLogChunk(0, start, sliceSize, false, receiver);
+                    start += sliceSize;
+                }
+                if (start < syncEndIndex) {
+                    len = (int) (syncEndIndex - start);
+                    sendAcceptorLogChunk(0, start, len, false, receiver);
+                }
+            } else {
+                int backLen = (int) (msgUnstableIndex - syncEndIndex);
+                if (backLen >= 0) {
+                    //fake send, spur leader re-propose inside receiveAcceptorLogChunk()
+                    sendAcceptorLogChunk(0, start, 0, false, receiver);
+                    //todo fall behind sender, send backSync message
+                    checkpointIndex = msgUnstableIndex/Configuration.checkpointInterval *
+                        Configuration.checkpointInterval;
+                    firstUnstableIndex = checkpointIndex + 1;
+                    //SyncMessage backSync = new SyncMessage(myID, firstUnstableIndex, backLen);
+                    //network.sendMessage(receiver, backSync);
+                    LOG.debug("backSync reset firstUnstable %d, checkpoint %d, len %d\n",
+                            firstUnstableIndex, checkpointIndex, backLen);
+                }
+            }
+
+        } else { //missing log entries in disk and memory
+            /* in-memory part [checkpointIndex+1, syncEndIndex-1] */
+            int mLen = (int) (syncEndIndex - checkpointIndex - 1);
+            LOG.debug("msgUnstable %s, checkpoint %d, SyncEndIndex %d, len %d\n",
+                    msgUnstableIndex, checkpointIndex, syncEndIndex, mLen);
+            if (mLen > 0) {
+                start = checkpointIndex+1;
+                slices = mLen/sliceSize;
+                for (int i=0; i < slices; i++) {
+                    sendAcceptorLogChunk(0, start, sliceSize, false, receiver);
+                    start += sliceSize;
+                }
+                if (start < syncEndIndex) {
+                    len = (int) (syncEndIndex - start);
+                    sendAcceptorLogChunk(0, start, len, false, receiver);
+                }
+            }
+
+            /* on-disk part [msgUnstableIndex, checkpointIndex] */
+            start = msgUnstableIndex;
+            int diff = (int) (checkpointIndex - msgUnstableIndex + 1);
+            slices = diff / sliceSize;
+            len = diff % sliceSize;
+
+            /* first sub chunk */
+            if (len > 0) {
+                sendAcceptorLogChunk(0, start, len, true, receiver);
+                start += len;
+            }
+
+            /* remaining full chunks */
+            for (int i = 0; i < slices; i++) {
+                sendAcceptorLogChunk(0, start, sliceSize, true, receiver);
+                start += sliceSize;
+            }
+        }
+    }
+
+## generate acceptMessage from either logCache or disk ##
+    private AcceptMessage genAcceptMsgChunkFromLogOrCache(long logIdx) {
+        long firstIdx = lastLogCacheCleanIndex+1;
+        if (logIdx <= checkpointIndex) {
+            LOG.warning("warning logIdx=%d < ckPt=%d cannot genAcceptMsg\n", logIdx, checkpointIndex);
+            return null;
+        } else if (logIdx < reProposeLastCacheIndex || logIdx >= firstIdx) { //in LogCache
+            if (acceptorLogCache.get(logIdx) == null) {
+                String noOp = "NO-OP";
+                byte[] noOpReq = noOp.getBytes();
+                LOG.warning("warning acceptorLogCache[%d] no-op, firstUn=%d, firstIdx=%d, rPLast=%d\n", logIdx,
+                        firstUnstableIndex, firstIdx, reProposeLastCacheIndex);
+                return new AcceptMessage(myID, 0, 0, maxRound, logIdx, firstUnstableIndex, noOpReq);
+            } else {
+                AcceptMessage prev = acceptorLogCache.get(logIdx);
+                LOG.debug("return from LogCache %d, old %s firstUn=%d, rPLast=%d, firstIdx=%d\n",
+                        logIdx, prev, firstUnstableIndex, reProposeLastCacheIndex, firstIdx);
+                return new AcceptMessage(myID, prev.getClientIDHash(), prev.getClientReqNum(), maxRound,
+                        prev.getIndex(), firstUnstableIndex, prev.getRequest());
+            }
+        } else {  //in Log prefetch
+            long fetchStart = System.nanoTime();
+            long end = logIdx + syncAccChunkSize*maxPendingCatchup*10-1;
+            if (null == accLogIterator || logIdx <= accLogIteratorPos) {
+                accLogIterator = acceptorLog.iterator(logIdx);
+                LOG.info("init accLogIterator logIdx=%d, itPos=%d\n", logIdx, accLogIteratorPos);
+            }
+            AcceptMessage accept;
+            accLogIteratorPos = logIdx-1;
+            LOG.info("reset logIdx=%d, itPos=%d\n", logIdx, accLogIteratorPos);
+            while (accLogIterator.hasNext()) {
+                accept = accLogIterator.next();
+                long index = accept.getIndex();
+                 if (index >= logIdx) {
+                     acceptorLogCache.put(index, accept);
+                     accLogIteratorPos++;
+                 }
+                 if (index >= end)
+                     break;
+                 //LOG.debug("==> disk while index=%d %s\n", index, accept);
+            }
+            if (firstUnstableIndex - reProposeLastCacheCleanIndex > maxAccLogCacheSize) {
+                reProposeLastCacheCleanIndex += maxAccLogCacheSize;
+                acceptorLogCache.headMap(reProposeLastCacheCleanIndex).clear();
+            }
+            // update reProposeLastCacheIndex
+            reProposeLastCacheIndex = accLogIteratorPos+1;
+            double fetchTime = (System.nanoTime() - fetchStart)/1000000.0;
+            LOG.info("(st %d, end %d, itPos %d) rPLastCache=%d time %.2f ms, return %s\n",
+                    logIdx, end, accLogIteratorPos, reProposeLastCacheIndex, fetchTime, acceptorLogCache.get(logIdx));
+
+            return acceptorLogCache.get(logIdx);
+        }
+    }
+
+## inform leader catchupDecision done inside processFreeLog() synchronized method ##
+    long tsSyncStart = System.currentTimeMillis();
+    //acceptorLog.sync();
+    catchupAccLog.moveDirectory(Configuration.catchupAccLogDir, Configuration.acceptorLogDir);
+    network.sendMessage(leaderID, new PingMessage(myID, -16));
+    LOG.info(">>processFreeLog acceptorCatchupDone=%b firstUn=%d switchF=%.1f(s) MOVEb=%.1f(s)\n",
+        acceptorCatchupDone, firstUnstableIndex, endTm, (System.currentTimeMillis()-tsSyncStart)/1000.0);
+
+## inform leader catchupDecision done inside acceptorCatchup() synchronized method ##
+    network.sendMessage(msg.getSender(), new PingMessage(myID, -16)); //inform leader catchupDecision done
+    long tsSyncStart = System.currentTimeMillis();
+    //acceptorLog.sync();
+    catchupAccLog.moveDirectory(Configuration.catchupAccLogDir, Configuration.acceptorLogDir);
+    LOG.info("#acceptorCatchupDone=%b firstUn=%d switchF=%.1f(s), MOVE=%.1f(s)\n", acceptorCatchupDone,
+            firstUnstableIndex, tm, (System.currentTimeMillis()-tsSyncStart)/1000.0);
+
+
+## iterate remove entries from HashMap ##
+    int sizeA = acceptorCatchupTrack.size();
+    Iterator<Map.Entry<Long, Quorum>> iterator = acceptorCatchupQuorums.entrySet().iterator();
+    while (iterator.hasNext()) {
+        Map.Entry<Long, Quorum> entry = iterator.next();
+        if (entry.getKey() < acceptorCatchupStart)
+            iterator.remove();
+    }
+
+## interactive send new batch of syncMessage inside acceptorCatchup() if we launch catchup in interactive manner ##
+    //send new batch of syncMsg
+    if (!acceptorCatchupSendDone && acceptorCatchupTrack.size() < maxPendingCatchup/2) {
+        if (acceptorCatchupEnd >= acceptorCatchupStart) {
+            int chunks = (int) ((acceptorCatchupEnd - acceptorCatchupStart + syncAccChunkSize)/syncAccChunkSize);
+            int sendChunks = Math.min(chunks, maxPendingCatchup);
+            int tsDrift = 2000;
+            for (int s = 0; s < sendChunks; s++) {
+                long cKey = acceptorCatchupStart + syncAccChunkSize * s;
+                //Quorum quorum = new Quorum(1, 0);
+                //quorum.qrmap.put(msg.getSender().hashCode(), new QuorumEntry(false,
+                //        System.currentTimeMillis()+tsDrift));
+                acceptorCatchupTrack.put(cKey, new AcceptMsgChunk(syncAccChunkSize, System.currentTimeMillis()));
+                LOG.info("acceptorCatchupTrack add entry[%d], s=%d, catchupQr %d, sendDone %b\n",
+                        cKey, s, acceptorCatchupTrack.size(), acceptorCatchupSendDone);
+                tsDrift += 2000;
+            }
+
+            SyncMessage sync;
+            if (chunks <= maxPendingCatchup) {
+                acceptorCatchupSendDone = true;
+                sync = new SyncMessage(myID, acceptorCatchupStart, (int)(acceptorCatchupEnd-acceptorCatchupStart+1));
+            } else {
+                sync = new SyncMessage(myID, acceptorCatchupStart, maxPendingCatchup * syncAccChunkSize);
+                acceptorCatchupStart += maxPendingCatchup * syncAccChunkSize;
+                LOG.info("#next wakeupCatchupSendStart %d, end %d, chunks %d\n",
+                        acceptorCatchupStart, acceptorCatchupEnd, chunks);
+            }
+
+            network.sendMessage(msg.getSender(), sync);
+            LOG.debug("acceptor catchup re-batch send %s =>%s\n", sync, msg.getSender());
+        }
+    }
+
+
+## handleTimer() ##
+    // (2A) check reProposeDone and accept/p2a timeout => leaderProcessAccepted()
+    //if (!reProposeDone) {
+    //    AcceptMessage accept = genAcceptMsgChunkFromLogOrCache(firstUnstableIndex);
+    //    if (accept != null) {
+    //        network.sendMessage(new NodeIdentifier(k), accept);
+    //        LOG.info("2A rePropose timeout resend %s=>%s\n", accept, new NodeIdentifier(k));
+    //    } else {
+    //        LOG.warning("2A rePropose accept<%d, %s>\n", firstUnstableIndex, accept);
+    //    }
+    //} else {
+        LOG.info("2A notice %s %d: %s timeout, swap it out\n",
+            (new NodeIdentifier(k)), firstUnstableIndex, entry);
+        leaderSwitchAcceptor(firstUnstableIndex, k);
+        break outLoop2A;
+    //}

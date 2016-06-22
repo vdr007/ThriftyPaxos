@@ -1,0 +1,170 @@
+--- src/glassPaxos/storage/AcceptorLog.java	(revision )
++++ src/glassPaxos/storage/AcceptorLog.java	(revision 413)
+@@ -463,166 +451,10 @@
+ 		}
+ 		log.sync();
+ 		log.garbageCollect(990);
+-		try {
+-			Thread.sleep(5000);
+-		} catch (InterruptedException e) {
+-			e.printStackTrace();
+-		}
++		Thread.sleep(5000);
+ 		Iterator<AcceptMessage> iter = log.iterator(-1);
+ 		while(iter.hasNext()){
+ 			System.out.println(iter.next());
+ 		}
+-	}
+-
+-	private static void moveDirectoryTestA(String oPath, String nPath, int logSize) {
+-		AcceptorLog oldLog = new AcceptorLog(oPath);
+-		AcceptorLog newLog = new AcceptorLog(nPath);
+-		NodeIdentifier acceptor = new NodeIdentifier(NodeIdentifier.Role.ACCEPTOR, 1);
+-		NodeIdentifier client = new NodeIdentifier(NodeIdentifier.Role.CLIENT, 2);
+-		int op = TestEntry.OP_TYPE.SETDATA.ordinal();
+-		String path = "AcceptorLogTest";
+-		AcceptMessage accept;
+-		int count = logSize;
+-		int offset = 2*count;
+-		for(int i=0; i<count; i++){
+-			String str = String.valueOf(i);
+-			TestEntry testEntry = new TestEntry(path, str, op);
+-			accept = new AcceptMessage(acceptor, client.hashCode(), i+1, 0, i, 0, testEntry.transformBytes());
+-			oldLog.update(accept);
+-			accept = new AcceptMessage(acceptor, client.hashCode(), i+10000+offset, 0, i+offset, 0, testEntry.transformBytes());
+-			newLog.update(accept);
+-		}
+-		oldLog.sync();
+-		newLog.sync();
+-		oldLog.close();
+-		newLog.close();
+-		System.out.printf("finish create old and new logs\n");
+-	}
+-
+-	public static void moveDirectory(String oPath, String nPath) {
+-		long ts = System.currentTimeMillis();
+-		Path srcPath = Paths.get(oPath);
+-		Path dstPath = Paths.get(nPath);
+-		try {
+-			if (!Files.exists(dstPath)) {
+-				Files.createDirectory(dstPath);
+-				System.out.printf("FV create new dir %s\n", nPath);
+-			}
+-
+-			Files.walkFileTree(srcPath, new FileVisitor(srcPath, dstPath));
+-
+-			if (!Files.exists(srcPath)) {
+-				Files.createDirectory(srcPath);
+-				System.out.printf("FV create old dir %s\n", oPath);
+-			}
+-			System.out.printf("FV finish moveDirectory time=%.2f s\n", (System.currentTimeMillis()-ts)/1000.0);
+-
+-		} catch (IOException e) {
+-			e.printStackTrace();
+-		}
+-	}
+-
+-	private static class FileVisitor extends SimpleFileVisitor<Path> {
+-		private Path src;
+-		private Path dst;
+-		double fileSize = 0.0;
+-		public FileVisitor(Path oPath, Path nPath) {
+-			this.src = oPath;
+-			this.dst = nPath;
+-		}
+-
+-		@Override
+-		public FileVisitResult preVisitDirectory (Path dir, BasicFileAttributes attrs)throws IOException {
+-			Path targetPath = dst.resolve(src.relativize(dir));
+-			if (!Files.exists(targetPath)) {
+-				Files.createDirectory(targetPath);
+-			}
+-			return FileVisitResult.CONTINUE;
+-		}
+-
+-		@Override
+-		public FileVisitResult visitFile (Path file, BasicFileAttributes attrs)throws IOException {
+-			fileSize += attrs.size()/(1024.0*1024);
+-			System.out.printf("FV cp and remove file %s, %.1f, total=%.1f MB\n", file.toString(),
+-					attrs.size()/(1024*1024.0), fileSize);
+-			Files.copy(file, dst.resolve(src.relativize(file)), StandardCopyOption.REPLACE_EXISTING);
+-			Files.delete(file);
+-			return FileVisitResult.CONTINUE;
+-		}
+-
+-		@Override
+-		public FileVisitResult postVisitDirectory (Path dir, IOException exc)throws IOException {
+-			System.out.printf("FV delete dir %s\n", dir.toString());
+-			Files.delete(dir);
+-			return FileVisitResult.CONTINUE;
+-		}
+-	}
+-
+-	private static boolean deleteDir(File dir) {
+-		if (dir.isDirectory()) {
+-			String[] children = dir.list();
+-			for (int i=0; i<children.length; i++) {
+-				boolean success = deleteDir(new File(dir, children[i]));
+-				if (!success) {
+-					return false;
+-				}
+-			}
+-		}
+-		System.out.printf("delete %s\n", dir.getAbsolutePath());
+-		return dir.delete();
+-	}
+-
+-	private static void scanNewLog(String path) {
+-		AcceptorLog log = new AcceptorLog(path);
+-		Iterator<AcceptMessage> it = log.iterator(-1);
+-		while(it.hasNext()){
+-			System.out.println(it.next());
+-		}
+-		log.close();
+-	}
+-
+-	public static void main(String []args) {
+-		Configuration.addActiveLogger("AcceptorLog", SimpleLogger.DEBUG);
+-		//File logDir = new File("/Users/rongshi/ywlab/glassPaxos/logtest");
+-		// for(File f: logDir.listFiles()){
+-		// 	f.delete();
+-		// }
+-		// basicTest();
+-
+-		// if (logDir.isDirectory()) {
+-		// 	String[] children = logDir.list();
+-		// 	for (int k=0; k<children.length; k++) {
+-		// 		boolean successClean = deleteDir(logDir);
+-		// 		System.out.printf("=>delete dir=%s, success=%b\n", logDir.getAbsolutePath(), successClean);
+-		// 	}
+-		// }
+-		//String oldPath = "/Users/rongshi/ywlab/glassPaxos/logtest/oldLog";
+-		//String newPath = "/Users/rongshi/ywlab/glassPaxos/logtest/newLog";
+-		String oldPath = "/home/hadoop-shir/catchupacceptorlog";
+-		String newPath = "/home/hadoop-shir/acceptorlog";
+-		// try {
+-		// 	if (!Files.exists(Paths.get(oldPath))) {
+-		// 		Files.createDirectory(Paths.get(oldPath));
+-		// 		System.out.printf("create old dir %s\n", oldPath);
+-		// 	}
+-		// 	if (!Files.exists(Paths.get(newPath))) {
+-		// 		Files.createDirectory(Paths.get(newPath));
+-		// 		System.out.printf("create new dir %s\n", newPath);
+-		// 	}
+-		// } catch (IOException e) {
+-		// 	e.printStackTrace();
+-		// }
+-		// moveDirectoryTestA(oldPath, newPath, 10);
+-		// scanNewLog(oldPath);
+-		// scanNewLog(newPath);
+-
+-		moveDirectory(oldPath, newPath);
+-		//scanNewLog(newPath);
+-
+-		// try {
+-		// 	Thread.sleep(2000);
+-		// } catch (InterruptedException e) {
+-		// 	e.printStackTrace();
+-		// }
+ 	}
+ }
